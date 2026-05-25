@@ -243,6 +243,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       <div style="font-size:11px;color:#666;margin-bottom:4px">Google Apps Script proxy URL</div>
       <input class="s-input" id="proxy-url" type="url" placeholder="https://script.google.com/macros/s/…/exec">
     </div>
+    <div style="margin-bottom:6px;margin-top:10px">
+      <div style="font-size:11px;color:#666;margin-bottom:4px">Leaderboard GAS URL <span style="color:#888;font-weight:400">(for revenue goals)</span></div>
+      <input class="s-input" id="leaderboard-url" type="url" placeholder="https://script.google.com/macros/s/…/exec">
+    </div>
+    <div style="margin-bottom:10px">
+      <div style="font-size:11px;color:#666;margin-bottom:4px">Leaderboard API key</div>
+      <input class="s-input" id="leaderboard-api-key" type="text" placeholder="GC_API_READONLY_KEY value" autocomplete="off">
+    </div>
     <button class="s-btn primary" id="load-btn" onclick="loadAllStores()">Load live data</button>
     <button class="s-btn full" onclick="refreshDutchieData()" style="margin-top:6px">↻ Refresh Dutchie data</button>
     <button class="s-btn full" onclick="clearCacheAndReload()" style="margin-top:4px">↻ Clear all cache &amp; reload</button>
@@ -250,6 +258,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div id="setup-err" class="err-msg" style="display:none"></div>
     <div class="s-hint">
       Deploy your Apps Script as a Web App with <code>Execute as: Me</code> and <code>Who has access: Anyone</code>. Paste the /exec URL above.<br>
+      Leaderboard URL + API key sync revenue goals from the leaderboard's computed targets.<br>
       <a href="https://developers.google.com/apps-script/guides/web" target="_blank">Apps Script deploy guide →</a>
     </div>
 
@@ -703,10 +712,16 @@ async function backfillDailyHistory(proxyUrl) {
 async function loadGoals() {
   const cached = readCache('goals');
   if (cached) { goals = cached; return; }
+  // Prefer leaderboard GAS URL (computed goals); fall back to proxy's own goals endpoint
+  const lbUrl    = document.getElementById('leaderboard-url').value.trim();
+  const lbApiKey = document.getElementById('leaderboard-api-key').value.trim();
   const proxyUrl = document.getElementById('proxy-url').value.trim();
-  if (!proxyUrl) return;
+  const goalsUrl = lbUrl
+    ? `${lbUrl}?action=goals${lbApiKey ? '&apiKey=' + encodeURIComponent(lbApiKey) : ''}`
+    : (proxyUrl ? `${proxyUrl}?action=goals` : null);
+  if (!goalsUrl) return;
   try {
-    const res  = await fetch(`${proxyUrl}?action=goals`);
+    const res  = await fetch(goalsUrl);
     const data = await res.json();
     if (data.goals) { goals = data.goals; writeCache('goals', data.goals); }
   } catch (e) {
@@ -2115,6 +2130,22 @@ buildTimeNav();
 buildStoreTabs();
 buildStatusGrid({});
 document.getElementById('proxy-url').value = DEFAULT_PROXY;
+// Restore leaderboard URL + API key from localStorage
+(function() {
+  var lbUrl = localStorage.getItem('gc_lb_url');
+  var lbKey = localStorage.getItem('gc_lb_api_key');
+  if (lbUrl) document.getElementById('leaderboard-url').value = lbUrl;
+  if (lbKey) document.getElementById('leaderboard-api-key').value = lbKey;
+  // Persist on change
+  document.getElementById('leaderboard-url').addEventListener('change', function() {
+    localStorage.setItem('gc_lb_url', this.value.trim());
+    localStorage.removeItem('gc_cache_goals'); // bust cache so next load re-fetches
+  });
+  document.getElementById('leaderboard-api-key').addEventListener('change', function() {
+    localStorage.setItem('gc_lb_api_key', this.value.trim());
+    localStorage.removeItem('gc_cache_goals');
+  });
+})();
 updateCacheStatus();
 // Auto-load on page open — no manual step needed
 loadAllStores();
