@@ -2130,12 +2130,16 @@ buildTimeNav();
 buildStoreTabs();
 buildStatusGrid({});
 document.getElementById('proxy-url').value = DEFAULT_PROXY;
-// Restore leaderboard URL + API key from localStorage
+// Leaderboard defaults (pre-wired; overridden by localStorage if user changes them)
+const DEFAULT_LB_URL = 'https://script.google.com/macros/s/AKfycbxXqtL-rKjuzFQkyADWnHGEoM2ZSYp9g4t1J6vhyDTgHcfkEuQocYrN9DXV7_84Masuqg/exec';
+const DEFAULT_LB_KEY = 'gc-sSfLJQvES6e7JHOMT2OqrA';
+
+// Restore leaderboard URL + API key from localStorage (fall back to defaults)
 (function() {
-  var lbUrl = localStorage.getItem('gc_lb_url');
-  var lbKey = localStorage.getItem('gc_lb_api_key');
-  if (lbUrl) document.getElementById('leaderboard-url').value = lbUrl;
-  if (lbKey) document.getElementById('leaderboard-api-key').value = lbKey;
+  var lbUrl = localStorage.getItem('gc_lb_url') || DEFAULT_LB_URL;
+  var lbKey = localStorage.getItem('gc_lb_api_key') || DEFAULT_LB_KEY;
+  document.getElementById('leaderboard-url').value = lbUrl;
+  document.getElementById('leaderboard-api-key').value = lbKey;
   // Persist on change
   document.getElementById('leaderboard-url').addEventListener('change', function() {
     localStorage.setItem('gc_lb_url', this.value.trim());
