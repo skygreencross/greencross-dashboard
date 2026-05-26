@@ -384,7 +384,11 @@ const STORES = [
   { name:'River',       display:'River',      color:'#D4537E' },
 ];
 
-let goals = {};       // loaded from budget spreadsheet via proxy
+// Leaderboard GAS — computed rolling/YoY goals, authoritative for current month
+const LEADERBOARD_GAS = 'https://script.google.com/macros/s/AKfycbxXqtL-rKjuzFQkyADWnHGEoM2ZSYp9g4t1J6vhyDTgHcfkEuQocYrN9DXV7_84Masuqg/exec';
+let lbGoals = null; // { month, year, stores: { locationName: { monthly, dow:[7] 0=Sun } } }
+
+let goals = {};       // loaded from budget spreadsheet via proxy (historical months)
 let expenseData = null; // loaded from QuickBooks via proxy
 let expensesLoading = false;
 let costData = null;    // loaded from Income Data Dump sheet via proxy
@@ -429,6 +433,48 @@ function getGoal(storeName, month) {
 }
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+/**
+ * Monthly goal for a store — leaderboard computed value when viewing current month,
+ * budget spreadsheet otherwise.
+ */
+function getMonthlyGoal(storeName, month /* 1–12 or 0=YTD */, year) {
+  if (month > 0 && lbGoals && year === lbGoals.year && MONTHS[month - 1] === lbGoals.month) {
+    const lb = lbGoals.stores[storeName];
+    if (lb && lb.monthly) return lb.monthly;
+  }
+  return getGoal(storeName, month);
+}
+
+/**
+ * Daily goal for a store on a specific day-of-week (0=Sun) — leaderboard computed
+ * value when viewing current month, DOW-weighted budget fallback otherwise.
+ */
+function getDailyGoal(storeName, dow, month /* 1–12 */, year, daysInMo) {
+  if (month > 0 && lbGoals && year === lbGoals.year && MONTHS[month - 1] === lbGoals.month) {
+    const lb = lbGoals.stores[storeName];
+    if (lb && lb.dow && lb.dow[dow] != null) return lb.dow[dow];
+  }
+  // Fallback: budget monthly scaled by DOW weight
+  const sg = getGoal(storeName, month);
+  const dowWeights = getDOWWeights([storeName]);
+  return sg * 7 / daysInMo * dowWeights[dow];
+}
+
+async function loadLeaderboardGoals() {
+  try {
+    const cached = readCache('lb_goals');
+    if (cached && cached.month && cached.stores) { lbGoals = cached; return; }
+    const res  = await fetch(`${LEADERBOARD_GAS}?action=getdailygoals`);
+    const data = await res.json();
+    if (data.stores) {
+      lbGoals = data;
+      writeCache('lb_goals', data); // 30-min TTL (see CACHE_TTL.lb_goals)
+    }
+  } catch (e) {
+    console.warn('[lb-goals] fetch failed:', e.message);
+  }
+}
 
 let section = 'income';
 let activeYear  = new Date().getFullYear();
@@ -569,6 +615,7 @@ function buildStatusGrid(state) {
 const CACHE_TTL = {
   costs:      60 * 60 * 1000,        // 1 hour — current month EOD data updates daily
   goals:      24 * 60 * 60 * 1000,   // 24 hours
+  lb_goals:   30 * 60 * 1000,        // 30 min — refreshes when stretch/goals change
   expbudgets: 24 * 60 * 60 * 1000,
   otherrev:   24 * 60 * 60 * 1000,
   inventory:  30 * 60 * 1000,        // 30 min — real-time stock changes throughout day
@@ -726,7 +773,7 @@ async function loadAllStores() {
 
   // Expenses loads after income; velocity (inventory) loads last — see end of this function
   loadExpenses();
-  await Promise.all([loadGoals(), loadCosts(), loadExpBudgets(), loadOtherRevenue()]);
+  await Promise.all([loadGoals(), loadLeaderboardGoals(), loadCosts(), loadExpBudgets(), loadOtherRevenue()]);
   liveData = {};
   const stateMap = Object.fromEntries(STORES.map(s => [s.name, 'loading']));
   buildStatusGrid(stateMap);
@@ -1103,22 +1150,29 @@ function renderIncome() {
   const today = new Date();
   const yr = activeYear;
   const monthNet = stores.reduce((a,s) => a+(liveData[s]?.netSales||0), 0);
-  const monthGoal = stores.reduce((a,s) => a + getGoal(s, activeMonth), 0);
+  const monthGoal = stores.reduce((a,s) => a + getMonthlyGoal(s, activeMonth, yr), 0);
   const daysInMo = activeMonth > 0 ? new Date(activeYear, activeMonth, 0).getDate() : 365;
 
   // COGS from Dutchie EOD sheet — per day, per store, aggregated to selected period
   const cost = computeCost(stores);
 
   // Scale goal to the selected period (day / week / month / YTD)
+  // For the current month: uses leaderboard's rolling/YoY computed goals.
+  // For historical months: falls back to DOW-weighted budget spreadsheet values.
   let periodGoal, goalLabel;
   if (activeDay) {
     const dow = new Date(activeDay + 'T12:00:00').getDay();
-    const dowWeights = getDOWWeights(stores);
-    periodGoal = monthGoal * 7 / daysInMo * dowWeights[dow];
+    periodGoal = Math.round(stores.reduce((a,s) => a + getDailyGoal(s, dow, activeMonth, yr, daysInMo), 0));
     goalLabel = 'Daily target';
   } else if (activeWeek) {
-    const weekDays = getDaysOfISOWeek(yr, activeWeek);
-    periodGoal = monthGoal * 7 / daysInMo;
+    // Weekly = sum of all 7 DOW goals (leaderboard) or flat budget/7×days formula
+    periodGoal = Math.round(stores.reduce((a,s) => {
+      if (activeMonth > 0 && lbGoals && yr === lbGoals.year && MONTHS[activeMonth-1] === lbGoals.month) {
+        const lb = lbGoals.stores[s];
+        if (lb && lb.dow) return a + lb.dow.reduce((x,y) => x+y, 0);
+      }
+      return a + getGoal(s, activeMonth) * 7 / daysInMo;
+    }, 0));
     goalLabel = 'Week target';
   } else {
     periodGoal = monthGoal;
@@ -1152,12 +1206,12 @@ function renderIncome() {
   const isClosed = pacingPct >= 100;
   let pacedGoal;
   if (!activeDay && !activeWeek && !isClosed && activeMonth > 0 && activeMonth === today.getMonth() + 1) {
-    // DOW-weighted pacing: sum daily targets for each elapsed day this month
-    const dowWeights = getDOWWeights(stores);
-    const weeklyGoal = periodGoal * 7 / daysInMo;
+    // DOW-weighted pacing: sum daily targets for each elapsed day this month.
+    // Uses leaderboard per-DOW goals for current month; falls back to budget DOW weights.
     let dowPaced = 0;
     for (let d = 1; d <= today.getDate(); d++) {
-      dowPaced += weeklyGoal * dowWeights[new Date(yr, activeMonth - 1, d).getDay()];
+      const dow = new Date(yr, activeMonth - 1, d).getDay();
+      dowPaced += stores.reduce((a,s) => a + getDailyGoal(s, dow, activeMonth, yr, daysInMo), 0);
     }
     pacedGoal = Math.round(dowPaced);
   } else {
@@ -1221,10 +1275,17 @@ function renderIncome() {
         const col     = st?.color || '#888';
         const snet    = storeNets[s];
         const bw      = Math.round(snet/maxNet*100);
-        const sMonthGoal = getGoal(s, activeMonth);
+        const sMonthGoal = getMonthlyGoal(s, activeMonth, yr);
         const sPeriodGoal = activeDay
-          ? (() => { const dow = new Date(activeDay + 'T12:00:00').getDay(); return sMonthGoal * 7 / daysInMo * getDOWWeights([s])[dow]; })()
-          : activeWeek ? sMonthGoal * 7 / daysInMo
+          ? getDailyGoal(s, new Date(activeDay + 'T12:00:00').getDay(), activeMonth, yr, daysInMo)
+          : activeWeek
+            ? (() => {
+                if (activeMonth > 0 && lbGoals && yr === lbGoals.year && MONTHS[activeMonth-1] === lbGoals.month) {
+                  const lb = lbGoals.stores[s];
+                  if (lb && lb.dow) return lb.dow.reduce((x,y) => x+y, 0);
+                }
+                return getGoal(s, activeMonth) * 7 / daysInMo;
+              })()
           : sMonthGoal;
         const sCompareGoal = isClosed ? sPeriodGoal : Math.round(sPeriodGoal * pacingPct / 100);
         const diff    = snet - sCompareGoal;
@@ -1454,12 +1515,14 @@ function buildMonthDailyChart(stores) {
       backgroundColor: col, borderRadius: 2, stack: 's'
     };
   });
-  // DOW-weighted daily target line
-  const monthGoal  = stores.reduce((a, s) => a + getGoal(s, activeMonth), 0);
-  const weeklyGoal = monthGoal * 7 / daysInMonth;
-  const dowWeights = getDOWWeights(stores);
-  const targetData = dates.map(d => Math.round(weeklyGoal * dowWeights[new Date(d.date + 'T12:00:00').getDay()]));
-  if (monthGoal > 0) {
+  // DOW-weighted daily target line — uses leaderboard goals for current month
+  const daysInMonth_ = activeMonth > 0 ? new Date(activeYear, activeMonth, 0).getDate() : 365;
+  const targetData = dates.map(d => {
+    const dow = new Date(d.date + 'T12:00:00').getDay();
+    return Math.round(stores.reduce((a, s) => a + getDailyGoal(s, dow, activeMonth, activeYear, daysInMonth_), 0));
+  });
+  const hasTarget = targetData.some(v => v > 0);
+  if (hasTarget) {
     datasets.push({
       type: 'line', label: 'Target',
       data: targetData,
