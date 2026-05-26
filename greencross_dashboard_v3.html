@@ -503,7 +503,8 @@ function mergeDailyData(storeName, dailyArr) {
   for (const d of (dailyArr || [])) {
     allDailyData[storeName][d.date] = d; // full object with netSales, grossSales, orders, discounts
   }
-  try { localStorage.setItem('gc_daily_acc', JSON.stringify(allDailyData)); } catch {}
+  // NOT persisted to localStorage — kept in-memory only.
+  // Writing all-time history on every merge call was the primary cause of quota overflow.
 }
 function getDailyNet(val) {
   if (!val) return 0;
@@ -703,7 +704,7 @@ function writeSalesCache(store, year, month, data) {
 
 function clearDutchieCache() {
   Object.keys(localStorage)
-    .filter(k => k.startsWith('gc_sales_') || k === 'gc_daily_acc')
+    .filter(k => k.startsWith('gc_sales_'))
     .forEach(k => localStorage.removeItem(k));
   allDailyData = {};
   liveData = {};
@@ -714,7 +715,7 @@ function clearDutchieCache() {
 
 function clearAllCache() {
   Object.keys(localStorage)
-    .filter(k => k.startsWith('gc_cache_') || k.startsWith('gc_sales_') || k === 'gc_daily_acc')
+    .filter(k => k.startsWith('gc_cache_') || k.startsWith('gc_sales_'))
     .forEach(k => localStorage.removeItem(k));
   inventoryData = {};
   allDailyData = {};
@@ -813,6 +814,12 @@ async function loadAllStores() {
   document.getElementById('setup-err').style.display = 'none';
   document.getElementById('load-btn').disabled = true;
   document.getElementById('load-btn').innerHTML = '<span class="spinner-inline"></span>Loading…';
+
+  // Proactively free space before any writes — historical sales data is rebuilt
+  // in-memory each session so evicting it here costs nothing.
+  evictHistoricalSalesCache();
+  // Also clear the accumulated daily history blob — no longer persisted (in-memory only)
+  localStorage.removeItem('gc_daily_acc');
 
   // Expenses loads after income; velocity (inventory) loads last — see end of this function
   loadExpenses();
