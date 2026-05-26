@@ -621,16 +621,29 @@ function buildStatusGrid(state) {
 
 // ── Local cache helpers ───────────────────────────────────────────────────────
 const CACHE_TTL = {
-  costs:      60 * 60 * 1000,        // 1 hour — current month EOD data updates daily
-  goals:      24 * 60 * 60 * 1000,   // 24 hours
-  lb_goals:   30 * 60 * 1000,        // 30 min — refreshes when stretch/goals change
-  expbudgets: 24 * 60 * 60 * 1000,
-  otherrev:   24 * 60 * 60 * 1000,
-  inventory:  30 * 60 * 1000,        // 30 min — real-time stock changes throughout day
-  velocity:    2 * 60 * 60 * 1000,   // 2 hours — velocity sheet syncs every few hours
+  costs:      60 * 60 * 1000,        // 1 hour  — large, stored in sessionMemCache only
+  goals:      24 * 60 * 60 * 1000,   // 24 hours — small, localStorage
+  lb_goals:   30 * 60 * 1000,        // 30 min  — small, localStorage
+  expbudgets: 24 * 60 * 60 * 1000,   //           small, localStorage
+  otherrev:   24 * 60 * 60 * 1000,   //           small, localStorage
+  inventory:  30 * 60 * 1000,        // 30 min  — per-store, localStorage
+  velocity:    2 * 60 * 60 * 1000,   // 2 hours — large, stored in sessionMemCache only
 };
 
+// Large caches that must NOT go in localStorage (costs ~100KB, velocity can be 1-2MB).
+// Kept in-memory for the tab lifetime — lost on refresh but refetch is fast enough.
+const SESSION_MEM_KEYS = new Set(['costs', 'velocity']);
+const sessionMemCache  = {};  // key → { data, ts }
+
 function readCache(key) {
+  // In-memory first (large transient items)
+  if (SESSION_MEM_KEYS.has(key)) {
+    const entry = sessionMemCache[key];
+    if (!entry) return null;
+    const ttl = CACHE_TTL[key] ?? 3600000;
+    return Date.now() - entry.ts <= ttl ? entry.data : null;
+  }
+  // localStorage for small long-lived items
   try {
     const raw = localStorage.getItem('gc_cache_' + key);
     if (!raw) return null;
@@ -653,17 +666,16 @@ function evictHistoricalSalesCache() {
 }
 
 function writeCache(key, data) {
+  // Large transient items → in-memory only (never touch localStorage)
+  if (SESSION_MEM_KEYS.has(key)) {
+    sessionMemCache[key] = { data, ts: Date.now() };
+    return;
+  }
   const payload = JSON.stringify({ data, ts: Date.now() });
   try {
     localStorage.setItem('gc_cache_' + key, payload);
   } catch(e) {
-    // Quota exceeded — evict all historical sales data and retry once
-    evictHistoricalSalesCache();
-    try {
-      localStorage.setItem('gc_cache_' + key, payload);
-    } catch(e2) {
-      console.warn('Cache write failed (storage full?):', e2.message);
-    }
+    console.warn('Cache write failed (storage full?):', e.message);
   }
 }
 
@@ -717,6 +729,7 @@ function clearAllCache() {
   Object.keys(localStorage)
     .filter(k => k.startsWith('gc_cache_') || k.startsWith('gc_sales_'))
     .forEach(k => localStorage.removeItem(k));
+  Object.keys(sessionMemCache).forEach(k => delete sessionMemCache[k]);
   inventoryData = {};
   allDailyData = {};
   lbGoals = null;
@@ -815,11 +828,12 @@ async function loadAllStores() {
   document.getElementById('load-btn').disabled = true;
   document.getElementById('load-btn').innerHTML = '<span class="spinner-inline"></span>Loading…';
 
-  // Proactively free space before any writes — historical sales data is rebuilt
-  // in-memory each session so evicting it here costs nothing.
-  evictHistoricalSalesCache();
-  // Also clear the accumulated daily history blob — no longer persisted (in-memory only)
+  // Proactively free space before any writes.
+  // Remove large items that should no longer be in localStorage (legacy cleanup).
+  localStorage.removeItem('gc_cache_costs');
+  localStorage.removeItem('gc_cache_velocity');
   localStorage.removeItem('gc_daily_acc');
+  evictHistoricalSalesCache();
 
   // Expenses loads after income; velocity (inventory) loads last — see end of this function
   loadExpenses();
