@@ -463,8 +463,15 @@ function getDailyGoal(storeName, dow, month /* 1–12 */, year, daysInMo) {
 
 async function loadLeaderboardGoals() {
   try {
+    const now = new Date();
+    const curMonth = MONTHS[now.getMonth()];
+    const curYear  = now.getFullYear();
     const cached = readCache('lb_goals');
-    if (cached && cached.month && cached.stores) { lbGoals = cached; return; }
+    // Only use cache if it's for the current month — stale month → re-fetch
+    if (cached && cached.month === curMonth && cached.year === curYear && cached.stores) {
+      lbGoals = cached;
+      return;
+    }
     const res  = await fetch(`${LEADERBOARD_GAS}?action=getdailygoals`);
     const data = await res.json();
     if (data.stores) {
@@ -633,11 +640,33 @@ function readCache(key) {
   } catch { return null; }
 }
 
+/** Evict oldest historical sales-cache entries to free space, then retry the write. */
+function evictOldSalesCache() {
+  const entries = Object.keys(localStorage)
+    .filter(k => k.startsWith('gc_sales_'))
+    .map(k => {
+      try { return { k, ts: JSON.parse(localStorage.getItem(k)).ts || 0 }; }
+      catch { return { k, ts: 0 }; }
+    })
+    .sort((a, b) => a.ts - b.ts); // oldest first
+  // Remove up to half, or at least 5, to make a meaningful dent
+  const toRemove = Math.max(5, Math.ceil(entries.length / 2));
+  entries.slice(0, toRemove).forEach(e => localStorage.removeItem(e.k));
+  console.log(`[cache] evicted ${toRemove} old sales entries to free space`);
+}
+
 function writeCache(key, data) {
+  const payload = JSON.stringify({ data, ts: Date.now() });
   try {
-    localStorage.setItem('gc_cache_' + key, JSON.stringify({ data, ts: Date.now() }));
+    localStorage.setItem('gc_cache_' + key, payload);
   } catch(e) {
-    console.warn('Cache write failed (storage full?):', e.message);
+    // Quota exceeded — evict old sales history and retry once
+    evictOldSalesCache();
+    try {
+      localStorage.setItem('gc_cache_' + key, payload);
+    } catch(e2) {
+      console.warn('Cache write failed (storage full?):', e2.message);
+    }
   }
 }
 
@@ -662,10 +691,16 @@ function readSalesCache(store, year, month) {
 }
 
 function writeSalesCache(store, year, month, data) {
+  const payload = JSON.stringify({ data, ts: Date.now() });
   try {
-    localStorage.setItem(`gc_sales_${store}_${year}_${month}`,
-      JSON.stringify({ data, ts: Date.now() }));
-  } catch(e) { console.warn('Sales cache write failed:', e.message); }
+    localStorage.setItem(`gc_sales_${store}_${year}_${month}`, payload);
+  } catch(e) {
+    // Quota exceeded — evict and retry once
+    evictOldSalesCache();
+    try {
+      localStorage.setItem(`gc_sales_${store}_${year}_${month}`, payload);
+    } catch(e2) { console.warn('Sales cache write failed:', e2.message); }
+  }
 }
 
 function clearDutchieCache() {
@@ -685,6 +720,7 @@ function clearAllCache() {
     .forEach(k => localStorage.removeItem(k));
   inventoryData = {};
   allDailyData = {};
+  lbGoals = null;
   console.log('Cache cleared');
 }
 
